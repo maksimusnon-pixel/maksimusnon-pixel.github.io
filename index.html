@@ -533,6 +533,34 @@
   }
   .owner-log-line { padding: 2px 0; }
 
+  .owner-login-view {
+    padding: 1.4rem 1.25rem 1.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .owner-login-hint {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+    margin-bottom: .25rem;
+  }
+  .owner-login-error {
+    font-size: 12px;
+    color: #f87171;
+    min-height: 14px;
+  }
+
+  .owner-fb-status {
+    font-size: 11px;
+    border-radius: var(--radius-sm);
+    padding: 7px 10px;
+    margin-bottom: 1.1rem;
+    border: 1px solid var(--border2);
+  }
+  .owner-fb-status.ok { color: #86efac; background: rgba(34,197,94,0.08); border-color: rgba(34,197,94,0.25); }
+  .owner-fb-status.bad { color: #fca5a5; background: rgba(220,38,38,0.08); border-color: rgba(220,38,38,0.25); }
+
   @media (max-width: 480px) {
     .owner-grid, .owner-price-grid, .owner-vis-grid { grid-template-columns: 1fr; }
   }
@@ -635,9 +663,23 @@
   <div class="owner-modal">
     <div class="owner-header">
       <span class="owner-title">⚙ OWNER PANEL</span>
-      <button class="owner-close" onclick="closeOwnerPanel()">✕</button>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button class="owner-close" id="ownerLogoutBtn" onclick="ownerLogout()" title="Выйти" style="display:none;">⎋</button>
+        <button class="owner-close" onclick="closeOwnerPanel()">✕</button>
+      </div>
     </div>
-    <div class="owner-body">
+
+    <div class="owner-login-view" id="ownerLoginView">
+      <p class="owner-login-hint">🔒 Вход для владельца сервера. Учётку создаёшь в Supabase → Authentication → Users → Add user.</p>
+      <input class="owner-input" id="ownerEmail" type="email" placeholder="Email" autocomplete="username">
+      <input class="owner-input" id="ownerPassword" type="password" placeholder="Пароль" autocomplete="current-password">
+      <button class="owner-btn grant" style="width:100%; text-align:center;" onclick="ownerLogin()">Войти</button>
+      <p class="owner-login-error" id="ownerLoginError"></p>
+    </div>
+
+    <div class="owner-body" id="ownerBody" style="display:none;">
+
+      <div class="owner-fb-status" id="ownerFbStatus"></div>
 
       <div class="owner-section">
         <div class="owner-section-title">Выдача привилегий</div>
@@ -679,12 +721,13 @@
       </div>
 
     </div>
-    <div class="owner-log" id="ownerLog"></div>
+    <div class="owner-log" id="ownerLog" style="display:none;"></div>
   </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 const perksData = {
   VIP:     ['Цветной ник в чате','Доступ к /fly в лобби','+1 слот /sethome','Префикс [VIP]','Скин питомца','Доступ к /kit vip'],
@@ -694,6 +737,9 @@ const perksData = {
   Smite:   ['Всё из Dragon','Молния при входе','Команда /smite','Доступ к топ-зонам','Особый эффект смерти','Небесные частицы'],
   KARLIK:  ['Всё из Smite','Уникальный KARLIK ник','Доступ ко всем зонам','VIP-комната на сервере','Персональный кит x2','Ранг навсегда','Особые права на форуме']
 };
+
+const RANKS = ['VIP','Sponsor','Looker','Dragon','Smite','KARLIK'];
+const RANK_ICONS = { VIP:'⭐', Sponsor:'💎', Looker:'👁', Dragon:'🐉', Smite:'⚡', KARLIK:'👑' };
 
 let selectedRank = null;
 let selectedPrice = null;
@@ -718,7 +764,8 @@ function selectRank(el) {
 
 function checkForm() {
   const nick = document.getElementById('nickInput').value.trim();
-  document.getElementById('buyBtn').disabled = !(selectedRank && nick.length >= 2);
+  const maintenance = cfg.settings.maintenance;
+  document.getElementById('buyBtn').disabled = maintenance || !(selectedRank && nick.length >= 2);
 }
 
 function handleBuy() {
@@ -742,24 +789,166 @@ function showToast(msg) {
   t._timer = setTimeout(() => t.classList.remove('show'), 2400);
 }
 
+/* ════════════════════════════════════════════════════════
+   SUPABASE — общая база данных для всех посетителей
+   Замени значения ниже на свои (Project Settings → API)
+   ════════════════════════════════════════════════════════ */
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';          // например https://abcxyz.supabase.co
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY'; // ключ "anon public"
+
+const PAGE_LOADED_AT = Date.now();
+let supabaseClient = null;
+let sbReady = false;
+
+/* Локальный кэш конфига. Используется как запасной вариант,
+   если Supabase ещё не настроен — сайт не должен ломаться. */
+let cfg = {
+  prices:     { VIP:99, Sponsor:199, Looker:299, Dragon:499, Smite:699, KARLIK:999 },
+  visibility: { VIP:true, Sponsor:true, Looker:true, Dragon:true, Smite:true, KARLIK:true },
+  content:    { title:'MineRackle', subtitle:'Поддержи сервер и получи уникальные привилегии, которые выделят тебя среди других игроков', footer:'© 2025 MineRackle', ip:'minerackle.mcsh.io' },
+  settings:   { maintenance:false, online:true, animations:true, confetti:false, onlineCount:128, forceReloadAt:0 }
+};
+
+const ORIGINAL_TITLE_HTML = 'Mine<span>Rackle</span>';
+const ORIGINAL_FOOTER_HTML = '© 2025 MineRackle · <a href="#">Правила</a> · <a href="#">Поддержка</a>';
+
+function isFocused(id) {
+  return document.activeElement && document.activeElement.id === id;
+}
+
+function renderFromConfig() {
+  // контент
+  const titleEl = document.querySelector('.hero-title');
+  titleEl.innerHTML = (cfg.content.title === 'MineRackle') ? ORIGINAL_TITLE_HTML : cfg.content.title;
+
+  document.querySelector('.hero-sub').textContent = cfg.content.subtitle;
+
+  const footerP = document.querySelector('footer p');
+  footerP.innerHTML = (cfg.content.footer === '© 2025 MineRackle') ? ORIGINAL_FOOTER_HTML : cfg.content.footer;
+
+  document.getElementById('ipText').textContent = cfg.content.ip;
+
+  if (!isFocused('cfgTitle')) document.getElementById('cfgTitle').value = cfg.content.title;
+  if (!isFocused('cfgSubtitle')) document.getElementById('cfgSubtitle').value = cfg.content.subtitle;
+  if (!isFocused('cfgFooter')) document.getElementById('cfgFooter').value = cfg.content.footer;
+  if (!isFocused('cfgIP')) document.getElementById('cfgIP').value = cfg.content.ip;
+  if (!isFocused('cfgOnlineCount')) document.getElementById('cfgOnlineCount').value = cfg.settings.onlineCount;
+
+  // статус сервера
+  document.getElementById('maintenanceBanner').style.display = cfg.settings.maintenance ? 'block' : 'none';
+  document.body.classList.toggle('no-anim', !cfg.settings.animations);
+
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  dot.style.background = cfg.settings.online ? 'var(--green)' : '#ef4444';
+  text.textContent = cfg.settings.online
+    ? `Сервер онлайн · ${cfg.settings.onlineCount} игроков`
+    : 'Сервер офлайн';
+
+  // карточки рангов
+  RANKS.forEach(r => {
+    const card = document.querySelector(`.card[data-rank="${r}"]`);
+    card.dataset.price = cfg.prices[r];
+    card.querySelector('.card-price').textContent = cfg.prices[r] + '₽';
+    card.style.display = cfg.visibility[r] ? '' : 'none';
+
+    if (selectedRank === r) {
+      selectedPrice = cfg.prices[r];
+      document.getElementById('perksPriceBadge').textContent = cfg.prices[r] + '₽';
+      document.getElementById('buyTitle').innerHTML = `Покупка: <span>${r} — ${cfg.prices[r]}₽</span>`;
+    }
+
+    const priceInput = document.getElementById('price_input_' + r);
+    if (priceInput && !isFocused('price_input_' + r)) priceInput.value = cfg.prices[r];
+
+    const visBtn = document.getElementById('vis_' + r);
+    if (visBtn) visBtn.innerHTML = `${RANK_ICONS[r]} ${r}: <b>${cfg.visibility[r] ? 'видим' : 'скрыт'}</b>`;
+  });
+
+  refreshToggleButtons();
+  checkForm();
+
+  // переагрузка по команде владельца — для ВСЕХ открытых вкладок
+  if (cfg.settings.forceReloadAt && cfg.settings.forceReloadAt > PAGE_LOADED_AT) {
+    location.reload();
+  }
+}
+
+async function pushUpdate(partial) {
+  if (!sbReady) {
+    showToast('⚠ Supabase не настроен — изменения только локально');
+    renderFromConfig();
+    return;
+  }
+  const { error } = await supabaseClient.from('site_config').update(partial).eq('id', 1);
+  if (error) {
+    showToast('Нет доступа — войдите в панель владельца');
+    console.error(error);
+  }
+}
+
+async function loadInitialConfig() {
+  try {
+    const { data, error } = await supabaseClient.from('site_config').select('*').eq('id', 1).single();
+    if (error || !data) { console.warn('Не удалось загрузить site_config, использую локальные значения', error); return; }
+    cfg = data;
+    renderFromConfig();
+  } catch (e) {
+    console.warn('Ошибка загрузки конфига', e);
+  }
+}
+
+function subscribeRealtime() {
+  supabaseClient
+    .channel('site_config_realtime')
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'site_config', filter: 'id=eq.1' }, (payload) => {
+      cfg = payload.new;
+      renderFromConfig();
+    })
+    .subscribe();
+}
+
+function updateFbStatusBadge() {
+  const el = document.getElementById('ownerFbStatus');
+  if (!el) return;
+  if (sbReady) {
+    el.className = 'owner-fb-status ok';
+    el.textContent = '🟢 Supabase подключен — изменения видят все посетители в реальном времени';
+  } else {
+    el.className = 'owner-fb-status bad';
+    el.textContent = '🔴 Supabase не настроен — вставь SUPABASE_URL и SUPABASE_ANON_KEY в код. Сейчас изменения только локальные.';
+  }
+}
+
+(function initSupabase() {
+  try {
+    if (typeof window.supabase === 'undefined') {
+      console.warn('Supabase SDK не загрузился (нет интернета?)');
+      return;
+    }
+    if (!SUPABASE_URL || SUPABASE_URL.includes('YOUR_') || !SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.includes('YOUR_')) {
+      console.warn('Заполни SUPABASE_URL и SUPABASE_ANON_KEY в коде сайта');
+      return;
+    }
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    sbReady = true;
+    loadInitialConfig();
+    subscribeRealtime();
+    supabaseClient.auth.onAuthStateChange((_event, session) => onAuthChange(session ? session.user : null));
+    supabaseClient.auth.getSession().then(({ data }) => onAuthChange(data.session ? data.session.user : null));
+  } catch (e) {
+    console.warn('Supabase init failed', e);
+  }
+})();
+
 /* ════════════════════════════════════════
    OWNER PANEL — открывается 4х нажатием ";"
    ════════════════════════════════════════ */
 
-const RANKS = ['VIP','Sponsor','Looker','Dragon','Smite','KARLIK'];
-const RANK_ICONS = { VIP:'⭐', Sponsor:'💎', Looker:'👁', Dragon:'🐉', Smite:'⚡', KARLIK:'👑' };
-
-const ownerSettings = {
-  maintenance: false,
-  online: true,
-  animations: true,
-  confetti: false,
-  onlineCount: 128
-};
-
 let semicolonCount = 0;
 let semicolonTimer = null;
 let ownerGridsBuilt = false;
+let isOwnerAuthed = false;
 
 document.addEventListener('keydown', (e) => {
   if (e.key === ';') {
@@ -775,9 +964,9 @@ document.addEventListener('keydown', (e) => {
 });
 
 function openOwnerPanel() {
-  if (!ownerGridsBuilt) buildOwnerGrids();
   document.getElementById('ownerOverlay').classList.add('visible');
-  refreshToggleButtons();
+  updateFbStatusBadge();
+  if (isOwnerAuthed && !ownerGridsBuilt) buildOwnerGrids();
   logOwner('Панель владельца открыта');
 }
 
@@ -785,19 +974,61 @@ function closeOwnerPanel() {
   document.getElementById('ownerOverlay').classList.remove('visible');
 }
 
+function onAuthChange(user) {
+  isOwnerAuthed = !!user;
+  const loginView = document.getElementById('ownerLoginView');
+  const body = document.getElementById('ownerBody');
+  const log = document.getElementById('ownerLog');
+  const logoutBtn = document.getElementById('ownerLogoutBtn');
+
+  if (isOwnerAuthed) {
+    loginView.style.display = 'none';
+    body.style.display = 'block';
+    log.style.display = 'block';
+    logoutBtn.style.display = 'inline-block';
+    if (!ownerGridsBuilt) buildOwnerGrids();
+    updateFbStatusBadge();
+    refreshToggleButtons();
+  } else {
+    loginView.style.display = 'flex';
+    body.style.display = 'none';
+    log.style.display = 'none';
+    logoutBtn.style.display = 'none';
+  }
+}
+
+async function ownerLogin() {
+  const email = document.getElementById('ownerEmail').value.trim();
+  const pass = document.getElementById('ownerPassword').value;
+  const errEl = document.getElementById('ownerLoginError');
+  errEl.textContent = '';
+
+  if (!sbReady) { errEl.textContent = 'Supabase не настроен — вход недоступен'; return; }
+
+  const { error } = await supabaseClient.auth.signInWithPassword({ email, password: pass });
+  if (error) {
+    errEl.textContent = 'Неверный email или пароль';
+  } else {
+    document.getElementById('ownerPassword').value = '';
+  }
+}
+
+function ownerLogout() {
+  if (sbReady) supabaseClient.auth.signOut();
+}
+
 function buildOwnerGrids() {
   document.getElementById('ownerGrantGrid').innerHTML = RANKS.map(r =>
     `<button class="owner-btn grant" onclick="grantRank('${r}')">${RANK_ICONS[r]} Выдать ${r}</button>`
   ).join('');
 
-  document.getElementById('ownerPriceGrid').innerHTML = RANKS.map(r => {
-    const card = document.querySelector(`.card[data-rank="${r}"]`);
-    return `<div class="owner-field"><label>${RANK_ICONS[r]} ${r}, ₽</label>
-      <input type="number" class="owner-input" value="${card.dataset.price}" oninput="updatePrice('${r}', this.value)"></div>`;
-  }).join('');
+  document.getElementById('ownerPriceGrid').innerHTML = RANKS.map(r =>
+    `<div class="owner-field"><label>${RANK_ICONS[r]} ${r}, ₽</label>
+      <input type="number" id="price_input_${r}" class="owner-input" value="${cfg.prices[r]}" oninput="updatePrice('${r}', this.value)"></div>`
+  ).join('');
 
   document.getElementById('ownerVisGrid').innerHTML = RANKS.map(r =>
-    `<button class="owner-toggle" id="vis_${r}" onclick="toggleVisibility('${r}')">${RANK_ICONS[r]} ${r}: <b>видим</b></button>`
+    `<button class="owner-toggle" id="vis_${r}" onclick="toggleVisibility('${r}')">${RANK_ICONS[r]} ${r}: <b>${cfg.visibility[r] ? 'видим' : 'скрыт'}</b></button>`
   ).join('');
 
   ownerGridsBuilt = true;
@@ -807,11 +1038,13 @@ function grantRank(rank) {
   const nick = document.getElementById('ownerNick').value.trim();
   if (!nick) { showToast('Введите ник игрока'); return; }
   showToast(`✅ ${rank} выдан игроку ${nick}`);
-  logOwner(`Выдан ранг ${rank} → ${nick}`);
+  logOwner(`Выдан ранг ${rank} → ${nick} (демо, без подключения к серверу)`);
 }
 
 function reloadSite() {
-  logOwner('Перезагрузка сайта...');
+  cfg.settings = { ...cfg.settings, forceReloadAt: Date.now() };
+  pushUpdate({ settings: cfg.settings });
+  logOwner('Команда перезагрузки отправлена всем посетителям');
   setTimeout(() => location.reload(), 300);
 }
 
@@ -823,17 +1056,11 @@ function resetOwnerForm() {
   document.getElementById('nickInput').value = '';
   document.getElementById('buyTitle').textContent = 'Выбери привилегию выше, чтобы продолжить';
   checkForm();
-  logOwner('Форма покупки сброшена');
+  logOwner('Форма покупки сброшена (локально, у тебя)');
 }
 
 function exportConfig() {
-  const config = {
-    prices: Object.fromEntries(RANKS.map(r => [r, document.querySelector(`.card[data-rank="${r}"]`).dataset.price])),
-    visibility: Object.fromEntries(RANKS.map(r => [r, document.querySelector(`.card[data-rank="${r}"]`).style.display !== 'none'])),
-    settings: ownerSettings,
-    ip: document.getElementById('ipText').textContent.trim()
-  };
-  const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'minerackle-config.json';
@@ -846,75 +1073,52 @@ function clearOwnerLog() {
 }
 
 function toggleSetting(key) {
-  ownerSettings[key] = !ownerSettings[key];
-  refreshToggleButtons();
-  applySettingsEffects();
-  logOwner(`${key} → ${ownerSettings[key] ? 'ON' : 'OFF'}`);
+  cfg.settings = { ...cfg.settings, [key]: !cfg.settings[key] };
+  renderFromConfig();
+  pushUpdate({ settings: cfg.settings });
+  logOwner(`${key} → ${cfg.settings[key] ? 'ON' : 'OFF'}`);
 }
 
 function setToggleLabel(id, icon, label, value, onText, offText) {
-  document.getElementById(id).innerHTML = `${icon} ${label}: <b>${value ? onText : offText}</b>`;
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = `${icon} ${label}: <b>${value ? onText : offText}</b>`;
 }
 
 function refreshToggleButtons() {
-  setToggleLabel('toggleMaintenanceBtn', '🚧', 'Режим обслуживания', ownerSettings.maintenance, 'ВКЛ', 'ВЫКЛ');
-  setToggleLabel('toggleOnlineBtn', ownerSettings.online ? '🟢' : '🔴', 'Статус сервера', ownerSettings.online, 'Онлайн', 'Офлайн');
-  setToggleLabel('toggleAnimBtn', '🎬', 'Анимации', ownerSettings.animations, 'ВКЛ', 'ВЫКЛ');
-  setToggleLabel('toggleConfettiBtn', '🎉', 'Конфетти при покупке', ownerSettings.confetti, 'ВКЛ', 'ВЫКЛ');
-}
-
-function applySettingsEffects() {
-  document.body.classList.toggle('no-anim', !ownerSettings.animations);
-  document.getElementById('maintenanceBanner').style.display = ownerSettings.maintenance ? 'block' : 'none';
-
-  const dot = document.getElementById('statusDot');
-  const text = document.getElementById('statusText');
-  dot.style.background = ownerSettings.online ? 'var(--green)' : '#ef4444';
-  text.textContent = ownerSettings.online
-    ? `Сервер онлайн · ${ownerSettings.onlineCount} игроков`
-    : 'Сервер офлайн';
-
-  checkForm();
+  setToggleLabel('toggleMaintenanceBtn', '🚧', 'Режим обслуживания', cfg.settings.maintenance, 'ВКЛ', 'ВЫКЛ');
+  setToggleLabel('toggleOnlineBtn', cfg.settings.online ? '🟢' : '🔴', 'Статус сервера', cfg.settings.online, 'Онлайн', 'Офлайн');
+  setToggleLabel('toggleAnimBtn', '🎬', 'Анимации', cfg.settings.animations, 'ВКЛ', 'ВЫКЛ');
+  setToggleLabel('toggleConfettiBtn', '🎉', 'Конфетти при покупке', cfg.settings.confetti, 'ВКЛ', 'ВЫКЛ');
 }
 
 function updatePrice(rank, value) {
-  const card = document.querySelector(`.card[data-rank="${rank}"]`);
-  card.dataset.price = value;
-  card.querySelector('.card-price').textContent = value + '₽';
-  if (selectedRank === rank) {
-    selectedPrice = value;
-    document.getElementById('perksPriceBadge').textContent = value + '₽';
-    document.getElementById('buyTitle').innerHTML = `Покупка: <span>${selectedRank} — ${value}₽</span>`;
-  }
-  logOwner(`Цена ${rank} → ${value}₽`);
+  const num = Number(value);
+  if (Number.isNaN(num)) return;
+  cfg.prices = { ...cfg.prices, [rank]: num };
+  renderFromConfig();
+  pushUpdate({ prices: cfg.prices });
+  logOwner(`Цена ${rank} → ${num}₽`);
 }
 
 function toggleVisibility(rank) {
-  const card = document.querySelector(`.card[data-rank="${rank}"]`);
-  const willHide = card.style.display !== 'none';
-  card.style.display = willHide ? 'none' : '';
-  document.getElementById('vis_' + rank).innerHTML =
-    `${RANK_ICONS[rank]} ${rank}: <b>${willHide ? 'скрыт' : 'видим'}</b>`;
-  logOwner(`Видимость ${rank} → ${willHide ? 'скрыт' : 'видим'}`);
+  cfg.visibility = { ...cfg.visibility, [rank]: !cfg.visibility[rank] };
+  renderFromConfig();
+  pushUpdate({ visibility: cfg.visibility });
+  logOwner(`Видимость ${rank} → ${cfg.visibility[rank] ? 'видим' : 'скрыт'}`);
 }
 
 function applyContent() {
-  const title = document.getElementById('cfgTitle').value.trim();
-  if (title) document.querySelector('.hero-title').textContent = title;
+  cfg.content = {
+    title: document.getElementById('cfgTitle').value.trim() || cfg.content.title,
+    subtitle: document.getElementById('cfgSubtitle').value.trim() || cfg.content.subtitle,
+    footer: document.getElementById('cfgFooter').value.trim() || cfg.content.footer,
+    ip: document.getElementById('cfgIP').value.trim() || cfg.content.ip
+  };
+  const count = parseInt(document.getElementById('cfgOnlineCount').value);
+  if (!Number.isNaN(count)) cfg.settings = { ...cfg.settings, onlineCount: count };
 
-  const subtitle = document.getElementById('cfgSubtitle').value.trim();
-  if (subtitle) document.querySelector('.hero-sub').textContent = subtitle;
-
-  const footer = document.getElementById('cfgFooter').value.trim();
-  if (footer) document.querySelector('footer p').textContent = footer;
-
-  const ip = document.getElementById('cfgIP').value.trim();
-  if (ip) document.getElementById('ipText').textContent = ip;
-
-  const count = document.getElementById('cfgOnlineCount').value;
-  if (count) ownerSettings.onlineCount = parseInt(count) || ownerSettings.onlineCount;
-
-  applySettingsEffects();
+  renderFromConfig();
+  pushUpdate({ content: cfg.content, settings: cfg.settings });
   logOwner('Контент сайта обновлён');
 }
 
