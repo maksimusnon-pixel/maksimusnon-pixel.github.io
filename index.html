@@ -564,6 +564,81 @@
   @media (max-width: 480px) {
     .owner-grid, .owner-price-grid, .owner-vis-grid { grid-template-columns: 1fr; }
   }
+
+  /* ── MUSIC PLAYER ── */
+  .music-player {
+    position: fixed;
+    bottom: 18px;
+    right: 18px;
+    z-index: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 999px;
+    padding: 8px 14px 8px 8px;
+    box-shadow: 0 12px 30px rgba(0,0,0,0.45);
+    max-width: 280px;
+  }
+  .music-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: rgba(34,197,94,0.12);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    flex-shrink: 0;
+  }
+  .music-icon.spin { animation: spin 3.5s linear infinite; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  .music-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+  .music-title {
+    font-size: 11px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 130px;
+  }
+  .music-sub {
+    font-size: 10px;
+    color: var(--muted);
+  }
+  .music-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .music-btn {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--surface2);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .music-btn:hover { border-color: var(--green); }
+
+  @media (max-width: 480px) {
+    .music-player { left: 14px; right: 14px; max-width: none; }
+    .music-title { max-width: 46vw; }
+  }
 </style>
 </head>
 <body>
@@ -725,10 +800,88 @@
   </div>
 </div>
 
+<!-- Music Player -->
+<audio id="bgAudio" preload="auto"></audio>
+<div class="music-player" id="musicPlayer">
+  <div class="music-icon" id="musicIcon">🎵</div>
+  <div class="music-meta">
+    <div class="music-title" id="trackTitle">—</div>
+    <div class="music-sub" id="trackSub">Нажми ▶, если не играет само</div>
+  </div>
+  <div class="music-controls">
+    <button class="music-btn" onclick="prevTrack()" title="Предыдущий">⏮</button>
+    <button class="music-btn" onclick="toggleMusic()" id="musicToggleBtn" title="Пауза/Играть">⏸</button>
+    <button class="music-btn" onclick="nextTrack()" title="Следующий">⏭</button>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+/* ════════════════════════════════════════
+   MUSIC PLAYER — плейлист, автозапуск
+   ════════════════════════════════════════ */
+const playlist = [
+  { src: 'audio/track1.mp3', title: 'IvyCraft Archive — 14.05.25' },
+  { src: 'audio/track2.mp3', title: 'IvyCraft — Night' },
+  { src: 'audio/track3.mp3', title: 'IvyCraft — Ебаный псих' },
+  { src: 'audio/track4.mp3', title: 'Розовое вино' },
+  { src: 'audio/track5.mp3', title: 'Сожги мосты' }
+];
+
+// перемешиваем порядок один раз при загрузке
+for (let i = playlist.length - 1; i > 0; i--) {
+  const j = Math.floor(Math.random() * (i + 1));
+  [playlist[i], playlist[j]] = [playlist[j], playlist[i]];
+}
+
+let trackIndex = 0;
+const bgAudio = document.getElementById('bgAudio');
+bgAudio.volume = 0.5;
+
+function loadTrack(i) {
+  trackIndex = (i + playlist.length) % playlist.length;
+  bgAudio.src = playlist[trackIndex].src;
+  document.getElementById('trackTitle').textContent = playlist[trackIndex].title;
+}
+
+function attemptPlay() {
+  bgAudio.play().then(() => {
+    document.getElementById('musicIcon').classList.add('spin');
+    document.getElementById('musicToggleBtn').textContent = '⏸';
+    document.getElementById('trackSub').textContent = 'Играет сейчас';
+  }).catch(() => {
+    document.getElementById('musicToggleBtn').textContent = '▶';
+    document.getElementById('trackSub').textContent = 'Нажми ▶, если не играет само';
+  });
+}
+
+function toggleMusic() {
+  if (bgAudio.paused) { attemptPlay(); }
+  else {
+    bgAudio.pause();
+    document.getElementById('musicIcon').classList.remove('spin');
+    document.getElementById('musicToggleBtn').textContent = '▶';
+  }
+}
+
+function nextTrack() { loadTrack(trackIndex + 1); attemptPlay(); }
+function prevTrack() { loadTrack(trackIndex - 1); attemptPlay(); }
+
+bgAudio.addEventListener('ended', nextTrack);
+
+loadTrack(0);
+attemptPlay();
+
+// если автозапуск заблокирован браузером — запускаем по первому
+// клику/нажатию клавиши в любом месте страницы
+['click', 'keydown', 'touchstart'].forEach(evt => {
+  document.addEventListener(evt, function unlockAudio() {
+    if (bgAudio.paused) attemptPlay();
+  }, { once: true });
+});
+
 const perksData = {
   VIP:     ['Цветной ник в чате','Доступ к /fly в лобби','+1 слот /sethome','Префикс [VIP]','Скин питомца','Доступ к /kit vip'],
   Sponsor: ['Всё из VIP','Доступ к /kit sponsor','Кастомный цвет ника','+2 слота /sethome','Иконка в табе','Приоритет в очереди'],
